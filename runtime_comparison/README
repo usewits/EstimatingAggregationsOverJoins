@@ -1,0 +1,8 @@
+Tool to compare runtime of SSJ, WS-join, US-join, HWS-join and HSSJ
+
+main.cpp
+> tool to run benchmarks
+
+gendata.cpp
+> can be used to generate data on disk
+
