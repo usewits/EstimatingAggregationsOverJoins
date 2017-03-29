@@ -168,7 +168,7 @@ template <typename T> vector<T> approximate_weighted_sample(const vector<T>& R, 
     return S;
 }
 
-
+//``zip'' together two vectors to produce one vector of pairs
 vector<pdd> zipvec(const vector<double>& l, const vector<double>& r) {
     assert(l.size() == r.size());
     int n=l.size();
@@ -195,6 +195,7 @@ vector<tdd> join(const Tstrat& R1, const Tstrat& R2) {
     return result;
 }
 
+//Print a vector of pairs to stdout
 vector<pdd> printvec(const vector<pdd>& V) {
     for(auto v : V) {
         cout << v.first << "\t" << v.second << endl;
@@ -202,7 +203,7 @@ vector<pdd> printvec(const vector<pdd>& V) {
     cout << endl;
 }
 
-
+//The minijoin operator
 vector<tdd> minijoin(const vector<pdd>& S, const Tstrat& R2) {
     vector<tdd> result;
     for(auto t1 : S) {
@@ -215,7 +216,8 @@ vector<tdd> minijoin(const vector<pdd>& S, const Tstrat& R2) {
     return result;
 }
 
-
+//Compute and show estimated confidence intervals of relative errors
+//Only works for sigma if 1/(1-sigma) << relative_errors.size()!
 void show_sigma_levels(vector<double>& relative_errors) {
     sort(relative_errors.begin(), relative_errors.end());
     double sigmas[] = {0.9, 0.95, 0.99};
@@ -225,6 +227,9 @@ void show_sigma_levels(vector<double>& relative_errors) {
     }
 }
 
+//Compute and show the mean and standard deviation of relative errors
+//Better suited for small numbers of experiments than confidence intervals but
+//also less useful to the user in practice since it is less robust
 void show_sd(vector<double>& relative_errors) {
     double mean = accumulate(relative_errors.begin(),relative_errors.end(),0.0)/relative_errors.size();
     double variance = 0;

@@ -42,6 +42,7 @@ vector<double> get_distribution(int n, double skew, double ratio = 0.0, double n
     return w;    
 }
 
+//unpack a tuple
 void getValues(double& a, double& b, double& c, const tdd& t) {
     a = get<0>(t);
     b = get<1>(t);
@@ -49,11 +50,22 @@ void getValues(double& a, double& b, double& c, const tdd& t) {
 }
 
 
-//O(1) time
+//Heuristic to determine intermediate sample size depending on:
+//	- weight distribution w
+//  - duplicate avoidence certainty level sigma
+//	- additional sample size inflation constant k_factor
+//  - the sample size m
+// This simple heuristic can be computed in O(1) time
 double HWS_heuristic_simple(const vector<double>& w, double sigma, double k_factor, int m) {
     return (double)m*(double)m;
 }
 
+//Heuristic to determine intermediate sample size depending on:
+//	- weight distribution w
+//  - duplicate avoidence certainty level sigma
+//	- additional sample size inflation constant k_factor
+//  - the sample size m
+// This correct heuristic can be computed in O(|w|) time (can be sped up using memoisation)
 double HWS_heuristic_complete(const vector<double>& w, double w_ratio, double sigma, double k_factor, int m) {
     double w_max = (*max_element(w.begin(), w.end()));//O(|w|) time
     double w_min = (*min_element(w.begin(), w.end()));
@@ -66,7 +78,10 @@ double HWS_heuristic_complete(const vector<double>& w, double w_ratio, double si
 
 //Generic function to estimate aggregates over joins
 //It can be used to obtain SSJ, HSSJ, WS-Join, HWS-Join or US-Join estimates (both filtered and unfiltered)
+//Note that the main sampling routine (range_sampler) is passed as an argument
 //Runs in O(k+n2) time (not as fast as possible, in favour of shorter code)
+//It cannot be used for runtime-experiments, as it uses some optimisations that would not be possible in arbitrary settings, 
+//for example CDFs and normalisations are precomputed/reused. These optimisations do not influence the outcome of the estimators.
 //recompute_normalisation should be set to true whenever any of the following variables have changed: h1, h2, R1, R2, R1_filter, R2_filter
 //    This adds O(n1) to the runtime
 //recompute_cdf causes memoisation of the cdf on R1. This cdf is invalidated if the normalisation is recomputed.
@@ -202,17 +217,20 @@ double generic_sample_join(function<double(double,double)> h1, function<double(d
 }
 
 
+//This function runs the quality experiments
+//- data is generated
+//- exact aggregates are computed
+//- relative errors of different methods are computed and printed
 //total memory requirement: ~ 11*n1*64 bits
 int main() {
     //initialize rng
     mt = mtwist_new();
-    //mtwist_seed(mt, 832982837UL);
     mtwist_seed(mt, time(NULL));
 
+	//Set sample size m, and HWS-parameters k_factor and sigma
     int m = 100;
     double k_factor = 1.0;
     double sigma = 0.99;
-    double sigma_factor = 1.0/log(1/sigma);
 
     // Generate R1
     int n1          = 200*MILLION;
@@ -220,7 +238,7 @@ int main() {
     double ratio1   = 20.0;
     int n_discrete1 = 10.0;
     vector<pdd> R1;//~n1*(2*64) bits of memory
-    {
+    {			//R1A and R1B are in a local scope to assure that they are deallocated
         vector<double> R1A = get_distribution(n1,skew1,ratio1,n_discrete1);
         vector<double> R1B = get_distribution(n1,1.0,n1);
         R1 = zipvec(R1A, R1B);
@@ -233,16 +251,20 @@ int main() {
     double ratio2   = 50.0;
     int n_discrete2 = 10.0;
     vector<pdd> R2;
-    {
+    {			//R2A and R2C are in a local scope to assure that they are deallocated
         vector<double> R2A = get_distribution(n2,skew2,ratio2,n_discrete2);
         vector<double> R2C = get_distribution(n2,1.0,n2);
         R2 = zipvec(R2A, R2C);
     }
     Tstrat stratR2 = stratify(R2);
    
-    // Define lambda functions
+	//Aggregation function; the sum of this function applied to (filtered) rows of J is the target aggregate
     auto aggregate_f = [] (double A, double B, double C) -> double {return C;};
 
+	//h1 and h2 are used to weigh samples in R1 and R2 in the sample join algorithm
+	//When h{1,2}_unif are used, a uniform output distribution is produced
+	//When h{1,2}_weighted are used, the output distribution weights are linear in C (must correspond to aggregate_f)
+	//When h1_US and h2_unif are used, the sampling distribution in R1 is uniform and can be sped up tremendously
     auto h1_unif =     []   (double A, double B) -> double {return 1.0;};
     auto h1_US = [&stratR2] (double A, double B) -> double {return 1.0/(double)(stratR2[A].size());};
     auto h1_weighted = []   (double A, double B) -> double {return 1.0;};
@@ -250,7 +272,17 @@ int main() {
     auto h2_unif = [] (double C) -> double {return 1.0;};
     auto h2_weighted = [] (double C) -> double {return C;};
 
+	//Choose the HWS-heuristic to use during the experiment (used to determine the intermediate sample size of HWS)
     auto HWS_heuristic = *HWS_heuristic_simple;
+
+	//We have two possible implementations of range_sampler as used by generic_sample_join,
+	//one is exact and the other is heuristic
+	//The inputs:
+	//  - m, the sample size
+	//  - w, the sampling weights
+	//  - c_w, a pointer to the CDF corresponding to w (can be NULL if c_w is not known)
+	//The output:
+	//  - an {exact,heuristic} weighted sample, represented by a vector of indices
 
     auto exact_sampler = [] (int m, const vector<double>& w, vector<double>* c_w) -> vector<int> {
                                 bool recompute_c_w = (c_w == NULL);
@@ -261,6 +293,7 @@ int main() {
                                     delete c_w;
                                 return result;
                             };
+	//This sampler uses the HWS_heuristic, and the constants sigma and k_factor
     auto heuristic_sampler = [&sigma,&k_factor,&HWS_heuristic] (int m, const vector<double>& w, vector<double>* c_w) -> vector<int> {
 
                                 int k = round(HWS_heuristic(w, sigma, k_factor, m));//O(1) or O(|w|) time
@@ -275,9 +308,15 @@ int main() {
 
     //Selection filters: tuples that produce a true are selected
     auto no_filter = [] (double X, double Y) -> bool {return true;};
-    auto range_filter = [] (double X, double Y) -> bool {return Y > 1.5e-3;};
-    auto rand_filter = [] (double X, double Y) -> bool {int* Z; Z=(int*)&Y; return (*Z)%2;};
+								//filter that select all tuples in J
 
+    auto rand_filter = [] (double X, double Y) -> bool {int* Z; Z=(int*)&Y; return (*Z)%2;};
+								//filter that selects tuples based on parity of floating point representation
+								//this is the least significant bit of the mantissa
+								//in our data, this bit is practically uncorrelated with value, and the selection
+								//can be seen as a deterministic uniformly random filter with selectivity 50%
+
+	//Choose the filters to use in the experiment
     auto R1_filter = no_filter;
     auto R2_filter = rand_filter;
  
@@ -290,7 +329,8 @@ int main() {
            //note stratR2[key].size() = m_2(t_1.A)
     }
 
-    //A list of generic-sample-join parameters and their names
+	//Different generic_sample_join parameters correspond to sample-join algorithms
+    //Here we define a list of parameters and the name of the associated sample-join algorithm
     set<int> sampling_methods_used = {0,1,2,3,4};
     string                          sample_types[] = {"SSJ     ","HSSJ    ","WS-Join ","HWS-Join",  "US-Join "};
     function<double(double,double)> h1_functions[] = { h1_unif,   h1_unif,  h1_weighted,h1_weighted, h1_US};
@@ -299,7 +339,9 @@ int main() {
     function<vector<int>(int, const vector<double>&, vector<double>*)> samplers[] = 
                         { exact_sampler, heuristic_sampler, exact_sampler, heuristic_sampler, exact_sampler};
    
-    //A list of filter methods and their names
+	//Different generic_sample_join parameters correspond to the filtered/unfiltered setting
+	//In the setting fltr.naive, a filter is used, but the exact normalisation W' is not used (instead, it is estimated from W)
+    //Here we define a list of parameters and the name of the associated filter mode
     set<int> filter_methods_used = {0,1,2};
     string filter_types[] = {"full      ","filtered  ","fltr.naive"};
     function<bool(double,double)> R1_filters[] = {no_filter, R1_filter, R1_filter};
@@ -307,7 +349,6 @@ int main() {
     bool filtered_estimations[] = {false, true, false};
 
     //Compute and print the true aggregate values for each filter mode (actually the same for filtered and fltr.naive)
-
     vector<double> true_aggregates(3, 0.0);
     vector<long long> filtered_join_size(3, 0);
     vector<double> selectivities(3, 0.0);
@@ -315,7 +356,7 @@ int main() {
     bool aggregate_f_independent_of_B = true;//True aggregate can be computed faster if simple.
 
     long long full_join_size = 0;
-    if(aggregate_f_independent_of_B) {//O(n1+n2) time
+    if(aggregate_f_independent_of_B) {//O(n1+n2) time exact aggregate computation
         map<double, double> R2_exact_aggregates[3];
         map<double, int> R2_exact_sizes[3];
         for(auto strat2 : stratR2) {
@@ -350,7 +391,7 @@ int main() {
                 }
             }
         }
-    } else {//O(|J|) time
+    } else {//O(|J|) time exact aggregate computation
         for(auto strat1 : stratR1) {
             double a = strat1.first;
             auto strat2it = stratR2.find(a);
@@ -383,53 +424,44 @@ int main() {
     
      
     //THE EXPERIMENTS
-
+	//nruns defines the number of times each experiments is run. It is set to 1000, to allow estimation of 
+	//the 99% confidence relative error by taking the 10th largest error.
     int nruns = 1000;
     while(true) {
-        cout << "Sample size? m = " << flush;
-        cin >> m;
-        cout << "Runs? nruns = " << flush;
-        cin >> nruns;
-        //Couls also set HWS mode..
-        
         map< pair<int, int>, vector<double> > relative_errors;
         
-        //Initialize the relative_errors object
+        //Initialize the relative_errors object (for each combination of sampling method and filter mode)
         for(int i_s : sampling_methods_used)
         for(int i_f : filter_methods_used) {
             relative_errors[make_pair(i_s, i_f)] = vector<double>(nruns, 0);
         }
- 
+
         cout << "Running " << nruns << "*" << relative_errors.size() << " experiments..." << endl;
  
-        //Remove HWS-based methods if HWS causes oversampling 
+        //Remove HWS-based methods if HWS causes oversampling; 
+		//runtime explodes if m is too big, since the HWS-heuristics depend on m*m
         double k_dbl = HWS_heuristic(SSJ_prob, sigma, k_factor, m);
         cout << "k = " << k_dbl << " (should be smaller than " << R1.size() << " for AWS)"<< endl;
         if(k_dbl > R1.size()) {
             cout << "WARNING: Skipping Heuristic methods!" << endl;
             sampling_methods_used.erase(1);
             sampling_methods_used.erase(3);
-        } else {
+        } else {//re-add HWS-based if they can be used
             sampling_methods_used.insert(1);
             sampling_methods_used.insert(3);
         }
 
-        
-        char confirm = 'n';
-        cout << "Are you sure? (y/n) " << flush;
-        cin >> confirm;
-        if(confirm != 'y')
-            continue;
-            
         //Run experiments for each setting nruns times
-        
         for(int i_f : filter_methods_used)
         for(int i_s : sampling_methods_used) {
-            int progress_width = 50;
+            int progress_width = 50;//progress bar size
+			
+			//Run nruns times
             for(int run_i=0; run_i<nruns; run_i++) {
                 if(floor(progress_width*(run_i+1)/(double)nruns) > floor(progress_width*(run_i)/(double)nruns)) {
                     int n_bars = round(progress_width*run_i/(double)nruns);//out of 100
                     cout << " [";
+
                     for(int progress = 0; progress < progress_width; progress++) {
                         if(progress < n_bars)
                             cout << "#";
@@ -441,6 +473,7 @@ int main() {
                     else
                         cout << "] " << round(100*run_i/(double)nruns) << "%\r" << flush;
                 }
+				//Only recompute normalisation in the first run in one setting
                 bool recompute_normalisation = (run_i == 0);
                 bool recompute_cdf = recompute_normalisation && !is_heuristic[i_s];
                     //Make generic_sample_join memoise normalisation only if it is not a heuristic sample join
@@ -449,14 +482,14 @@ int main() {
                                                       m, R1, R2, samplers[i_s], aggregate_f, 
                                                       R1_filters[i_f], R2_filters[i_f], filtered_estimations[i_f],
                                                       selectivities[i_f], recompute_normalisation, recompute_cdf);
+				//store all relative errors
                 relative_errors[make_pair(i_s, i_f)][run_i] = abs(true_aggregates[i_f]-estimate)/true_aggregates[i_f];
             }
 
             //Print the results (CI intervals)
             cout << sample_types[i_s] << "(" << filter_types[i_f] << "):" << endl;
             //show_sigma_levels(relative_errors[make_pair(i_s, i_f)]);
-            show_sd(relative_errors[make_pair(i_s, i_f)]);
-
+            show_sigma_levels(relative_errors[make_pair(i_s, i_f)]);
         }
     }
 
