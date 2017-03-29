@@ -1,5 +1,5 @@
 Tool to compare runtime of SSJ, WS-join, US-join, HWS-join and HSSJ.
-Linux only; It depends on system calls to `/proc/sys/vm/drop_caches` and `/usr/bin/tee` (and `echo`, `sync`, `sleep`).
+This tool is Linux only as it depends on system calls to `/proc/sys/vm/drop_caches` (among others).
 
 To run experiments, you have to first generate data and then run the experiments. You need root to run the experiments, since these rights are required to drop the page cache.
 
@@ -7,7 +7,7 @@ To run experiments, you have to first generate data and then run the experiments
 ./gendata.bash
 sudo ./runexperiments.bash
 ```
-Note that ample RAM is needed to store all columns in memory and the flushing code assumes that the L3 cache is much smaller than 50MiB. If desired, experiment parameters can be changed directly in `main.cpp`. 
+Note that ample RAM is needed to store all columns in memory and that the flushing code assumes that the L3 cache is much smaller than 50MiB. If desired, experiment parameters can be changed directly in `main.cpp`. 
 
 `main.cpp`
 > code to run benchmarks
