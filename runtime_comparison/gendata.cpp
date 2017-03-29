@@ -8,7 +8,7 @@ using namespace std;
 
 int main() {
 	ofstream fout("database.txt");
-	int sf = 1000000000;
+	int sf = 100000000;
 	for(int i=0; i<sf; i++) {//64*sf characters
 		stringstream strs;
 		strs << i;

@@ -16,28 +16,39 @@
 
 using namespace std;
 
-
+//Set the number of rows for the different relations.
+//Make sure that database.txt is sufficiently large to support this!
 int R1A_size = 200000000;
 int R1B_size = 200000000;
 int R2A_size = 2000;
 int R2C_size = 2000;
 
-unsigned long R1A_offset = 0;
-unsigned long R1B_offset = R1A_offset+R1A_size;const char* R1A_mem;
-unsigned long R2A_offset = R1B_offset+R1B_size;const char* R1B_mem;
-unsigned long R2C_offset = R2A_offset+R2A_size;const char* R2A_mem;
+//A pointer to the on-disk data and its size in bytes
+//This file is mmapped. We do allow paging during experiments.
+//The page cache is flushed in between experiments to guarantee
+//that on-disk data starts out cold.
+char* data_disk;
+unsigned long filelen;
 
+//Offsets of columns in the on-disk data
+unsigned long R1A_offset = 0;
+unsigned long R1B_offset = R1A_offset+R1A_size;
+unsigned long R2A_offset = R1B_offset+R1B_size;
+unsigned long R2C_offset = R2A_offset+R2A_size;
+
+//Pointers to in-memory versions of all columns
+const char* R1A_mem;
+const char* R1B_mem;
+const char* R2A_mem;
 const char* R2C_mem;
 
-unsigned long filelen;
-char* data_disk;
-
+//Pointers to on-disk versions of all columns
 const char* R1A_disk;
 const char* R1B_disk;
 const char* R2A_disk;
 const char* R2C_disk;
 
-//The function mmapopen was obtained from https://github.com/hannesmuehleisen/leaderboard-demo with permission
+//Create a mmap to the file <filename> of size filelen
 void* mmapopen(char* filename, unsigned long &filelen, bool write) {
 	int fd;
 	struct stat sbuf;
@@ -64,7 +75,7 @@ void* mmapopen(char* filename, unsigned long &filelen, bool write) {
     return mapaddr;
 }
 
-//We did implement mmapclose ourselves
+//Close a mmap (this allows any cached content to be flushed from memory)
 void mmapclose(void* mapaddr, unsigned long filelen) {
     if (munmap(mapaddr, filelen) != 0) {
         fprintf(stderr, "failed to munmap\n");
@@ -73,9 +84,11 @@ void mmapclose(void* mapaddr, unsigned long filelen) {
     return;
 }
 
-
-
-
+//Flush the following:
+//- page cache
+//- CPU cache
+//Columns that are supposed to reside in main memory are re-heated
+//Iff close_mmap == true, the mmaps to on-disk files are munmapped first
 void flush_all_caches(bool close_mmap) {
 	if(close_mmap) {
 		cout << "closing memory maps.." << endl;
@@ -84,10 +97,10 @@ void flush_all_caches(bool close_mmap) {
 	} else {
 		cout << "skipped closing memory maps.." << endl;
 	}
-	
 
 	cout << "flusing page cache.." << endl;
-	system("echo 3 | sudo /usr/bin/tee /proc/sys/vm/drop_caches");
+	//Root rights are required to run the following command:
+	system("echo 3 | /usr/bin/tee /proc/sys/vm/drop_caches");
 
 	system("sync");
 
@@ -106,7 +119,8 @@ void flush_all_caches(bool close_mmap) {
 	system("sync");
 
 	cout << "flusing page cache.." << endl;
-	system("echo 3 | sudo /usr/bin/tee /proc/sys/vm/drop_caches");
+	//Root rights are required to run the following command:
+	system("echo 3 | /usr/bin/tee /proc/sys/vm/drop_caches");
 
 	system("sync");
 
@@ -144,13 +158,11 @@ void flush_all_caches(bool close_mmap) {
 	}
 	cout << no_opt;
 
-
-
 	system("sync");
 
 	cout << "flusing CPU cache" << endl;
 
-	const int size = 50*1024*1024; // Allocate 100M. Set much larger then L3
+	const int size = 50*1024*1024; // Allocate 50MiB. Should be much larger then L3
 	char *c = (char *)malloc(size);
 	for (int i = 0; i < 0x3f; i++)
 		for (int j = 0; j < size; j++)
@@ -165,13 +177,13 @@ void flush_all_caches(bool close_mmap) {
 	cout << "flusing done!" << endl;
 }
 
+//Weight function to be used for non-uniform sampling
 double get_weight(double A, double B, double C) {
 	return A+B*C;
 }
 
-
-
-char* wr_uniform_sample(const char* data, int n, int m) {//with replacement
+//Obtain a size m with-replacement uniform sample over the first n rows of data
+char* wr_uniform_sample(const char* data, int n, int m) {
 	char* result = (char*)malloc(m*sizeof(char));
 	for(int i=0; i<m; i++) {
 		result[i] = data[rand()%n];
@@ -179,7 +191,8 @@ char* wr_uniform_sample(const char* data, int n, int m) {//with replacement
 	return result;
 }
 
-set<pair<int,char> > wor_uniform_sample(const char* data, int n, int m) {//without replacement
+//Obtain a size m without-replacement uniform sample over the first n rows of data
+set<pair<int,char> > wor_uniform_sample(const char* data, int n, int m) {
 	set<pair<int,char> > result;
 	while(result.size()<m) {
 		int rand_index = rand()%n;
@@ -188,8 +201,9 @@ set<pair<int,char> > wor_uniform_sample(const char* data, int n, int m) {//witho
 	return result;
 }
 
-//Uniform reservoir sample
-char* wor_reservoir_sample(const char* data, int n, int m) {//without replacement
+//Obtain a size m without-replacement uniform sample over
+// the first n rows of data using reservoir sampling
+char* wor_reservoir_sample(const char* data, int n, int m) {
 	char* result = (char*)malloc(m*sizeof(char));
 	for(int i=0; i<m; i++) {
 		result[i] = data[i];
@@ -202,8 +216,10 @@ char* wor_reservoir_sample(const char* data, int n, int m) {//without replacemen
 	return result;
 }
 
-//Based on Alg-A by Efraimidis and Spirakis
-multimap<double,char> weighted_wor_reservoir_sample(const char* data, const char* w, int n, int m) {//without replacement
+//Obtain a size m without-replacement weighted sample over
+// the first n rows of data using reservoir sampling with weights w
+//Based on Alg-A from 'Weighted random sampling with a reservoir' by Efraimidis and Spirakis in 2006
+multimap<double,char> weighted_wor_reservoir_sample(const char* data, const char* w, int n, int m) {
 	double* keys = (double*)malloc(n*sizeof(double));
 	for(int i=0; i<n; i++) {
 		keys[i] = pow(rand()/(double)RAND_MAX,1.0/(double)w[i]);
@@ -225,8 +241,10 @@ multimap<double,char> weighted_wor_reservoir_sample(const char* data, const char
 	return result;
 }
 
-//Based on Alg-A-exp by Efraimidis and Spirakis
-multimap<double,char> weighted_wor_reservoir_sample_exp(const char* data, const char* w, int n, int m) {//without replacement
+//Obtain a size m without-replacement weighted sample over
+// the first n rows of data using reservoir sampling with exponential jumps and weights w
+//Based on Alg-A-exp from 'Weighted random sampling with a reservoir' by Efraimidis and Spirakis in 2006
+multimap<double,char> weighted_wor_reservoir_sample_exp(const char* data, const char* w, int n, int m) {
 	double* keys = (double*)malloc(m*sizeof(double));
 	for(int i=0; i<m; i++) {
 		keys[i] = pow(rand()/(double)RAND_MAX,1/(double)w[i]);
@@ -261,11 +279,16 @@ multimap<double,char> weighted_wor_reservoir_sample_exp(const char* data, const 
 
 
 
-
+//The main function running benchmarks
+//A CSV is outputted to stdout, each line belonging to the CSV is prepended with an '@'
+//Other output does not contain '@' characters
 int main() {
   	cout << "RAND_MAX..." << RAND_MAX << " should be > " << R1A_size << endl;
+	assert(RAND_MAX > R1A_size);//if they are close, there could be non-uniformity issues
 
 	cout << "Filling in memory columns..." << endl;
+	//The data consists of uniformly distributed 1-byte integers.
+	//The distribution of the data does not influence the runtime (see paper)
 
 	stringstream mem_database_stream;
 	for(int i=0; i < (int)(R1A_size+R1B_size+R2A_size+R2C_size)/(double)8+1; i++) {
@@ -291,10 +314,28 @@ int main() {
 	//Take S uniform/weighted/AWS sample in R1
 	//For each element in S, take uniform/weighted sample in (part of) R2
 
+	//We compute the following integer to avoid optimisations cutting out complete loops when using -O3
 	int do_not_optimize = 0;
 
-	cout<<"@R1_mem"<<","<<"R2_mem"<<","<<"m"<<","<<"n1"<<","<<"n2"<<","<<"WS"<<","<<"t"<<"},{"<<endl;
+	cout<<"@R1_mem"<<","<<"R2_mem"<<","<<"m"<<","<<"n1"<<","<<"n2"<<","<<"WS"<<","<<"t"<<endl;
 
+	//Main loop running runtime experiments
+	//'experiment' denotes setting (location of R1 and R2)
+	//'m_frac' sets the sampling fraction m/n_1
+	//'repeati' counts the number of times the experiment is repeated (fixed to 5 here)
+	//
+	//experiment == 0:
+	//  R1 on disk
+	//  R2 on disk
+	//experiment == 1:
+	//  R1 in memory
+	//  R2 on disk
+	//experiment == 2:
+	//  R1 on disk
+	//  R2 in memory
+	//experiment == 3:
+	//  R1 in memory
+	//  R2 in memory
 	for(int experiment = 0; experiment < 4; experiment++)
 	for(double m_frac = 2e-8; m_frac < 1.0; m_frac *= 10)
 	for(int repeati = 0; repeati<5; repeati++)
@@ -332,8 +373,8 @@ int main() {
 		}
 		cout << "m = " << m << endl;
 
-	//WS-join, h wo c
-
+	//WS-join (reservoir sampling with exponential jumps)
+	//The output distribution function h does not depend on C
 		flush_all_caches(true);
 		auto t_ws_h_wo_c_begin = chrono::high_resolution_clock::now();
 		{
@@ -353,12 +394,12 @@ int main() {
 		auto t_ws_h_wo_c = (std::chrono::duration_cast<std::chrono::nanoseconds>(t_ws_h_wo_c_end-t_ws_h_wo_c_begin).count());
 
 		cout << "WS (h w/o c) " << t_ws_h_wo_c << endl;
-		cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<true<<","<<t_ws_h_wo_c<<"},{"<<endl;
+		cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<true<<","<<t_ws_h_wo_c<<endl;
 
 
 
-	//WS-join, h wo c NO EXP
-
+	//WS-join (reservoir sampling without exponential jumps)
+	//The output distribution function h does not depend on C
 		flush_all_caches(true);
 		auto t_ws_noexp_h_wo_c_begin = chrono::high_resolution_clock::now();
 		{
@@ -378,11 +419,10 @@ int main() {
 		auto t_ws_noexp_h_wo_c = (std::chrono::duration_cast<std::chrono::nanoseconds>(t_ws_noexp_h_wo_c_end-t_ws_noexp_h_wo_c_begin).count());
 
 		cout << "WS (h w/o c) " << t_ws_noexp_h_wo_c << endl;
-		cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<2<<","<<t_ws_noexp_h_wo_c<<"},{"<<endl;
+		cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<2<<","<<t_ws_noexp_h_wo_c<<endl;
 
 
 	//US-join
-
 		flush_all_caches(true);
 		auto t_us_begin = chrono::high_resolution_clock::now();
 		{
@@ -402,11 +442,10 @@ int main() {
 		auto t_us = (std::chrono::duration_cast<std::chrono::nanoseconds>(t_us_end-t_us_begin).count());
 
 		cout << "US           "<< t_us << endl;
-		cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<false<<","<<t_us<<"},{"<<endl;
+		cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<false<<","<<t_us<<endl;
 
 
 	//HWS-join
-
 		flush_all_caches(true);
 		if(m*m < R1A_size) {
 			auto t_hws_begin = chrono::high_resolution_clock::now();
@@ -435,7 +474,7 @@ int main() {
 			auto t_hws = (std::chrono::duration_cast<std::chrono::nanoseconds>(t_hws_end-t_hws_begin).count());
 
 			cout << "HWS           "<< t_hws << endl;
-			cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<3<<","<<t_hws<<"},{"<<endl;
+			cout<<"@"<<R1_mem<<","<<R2_mem<<","<<m<<","<<R1A_size<<","<<R2A_size<<","<<3<<","<<t_hws<<endl;
 		}
 
 
